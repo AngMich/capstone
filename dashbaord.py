@@ -2,9 +2,11 @@ import pandas as pd
 import joblib
 import os
 import streamlit as st
+import plotly.graph_objects as go
 
 
-def collect_inputs():
+def collect_inputs(): #this function collects the user inputs and creates the mian UI of the applicetion
+    st.set_page_config(layout="wide")
     st.title('Energy Efficiency Strategy Room')
     st.write('welcome to the energy efficiency strategy room:')
     st.write('you will be given some input choices for the data center configuration')
@@ -18,7 +20,7 @@ def collect_inputs():
         format_func=lambda x: "seasonal testing" if x == 1 else "manual testing"
     )
 
-    if at == 1:
+    if at == 1:#this if helps with selecting the ambient temp either manul input of seasonal
         ambient_temp_choice = st.selectbox(
             "Ambient temperature input mode",
             options=[1, 2, 3, 4],
@@ -44,7 +46,7 @@ def collect_inputs():
             ambient_temp = float(
                 st.number_input("Ambient temperature is too high try less than 57:", value=57.0, step=0.5))
 
-    s = st.selectbox(
+    s = st.selectbox(#helps with selecting the cooling strategy
         "Enter Cooling Strategy:",
         options=[1, 2, 3, 4, 5],
         format_func=lambda x: {
@@ -61,6 +63,8 @@ def collect_inputs():
     return workload, inlet_temp, ambient_temp, s ,strategy
 
 def get_predictions(workload, inlet_temp, ambient_temp, strategy):
+    #this function calls the pretrained models and
+    #and gets their predictions
     saved_data = pd.DataFrame({
         'Server_Workload(%)': [workload],
         'Inlet_Temperature(°C)': [inlet_temp],
@@ -71,27 +75,141 @@ def get_predictions(workload, inlet_temp, ambient_temp, strategy):
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     cooling_model = joblib.load(os.path.join(script_dir, 'final_ridge_model_cooling.pkl'))
-    outlook_model_09 = joblib.load(os.path.join(script_dir, 'final_quantile_model_outlook_09.pkl'))
-    outlook_model_01 = joblib.load(os.path.join(script_dir, 'final_quantile_model_outlook_01.pkl'))
-    outlook_model_05 = joblib.load(os.path.join(script_dir, 'final_quantile_model_outlook_05.pkl'))
+    #calls the model wich is saved in a .plk file
+    outlook_model_09 = joblib.load(os.path.join(script_dir, 'final_quantile_model_outlet_09.pkl'))
+    outlook_model_01 = joblib.load(os.path.join(script_dir, 'final_quantile_model_outlet_01.pkl'))
+    outlook_model_05 = joblib.load(os.path.join(script_dir, 'final_quantile_model_outlet_05.pkl'))
 
     cooling_pred = cooling_model.predict(saved_data)[0]
+    #gets the final prediction, [0] to have only the number and not the brackets
     outlook_pred_01 = outlook_model_01.predict(saved_data)[0]
     outlook_pred_05 = outlook_model_05.predict(saved_data)[0]
     outlook_pred_09 = outlook_model_09.predict(saved_data)[0]
 
     return cooling_pred, outlook_pred_01, outlook_pred_05, outlook_pred_09
 
+def pue_bar_chart(pue):#this function is incharge with the PUE widget to help with the output visualization
+    fig = go.Figure()
+    fig.add_trace(go.Indicator(
+        mode="gauge+number",
+        value=float(pue),
+        title={'text': "PUE"},
+        gauge={
+            'axis':{'range':[1, 2]},
+            'bar':{'thickness': 0.35},
+            'steps':[
+                {'range':[1, 1.5], 'color': "lightgreen"},
+                {'range':[1.5, 2], 'color': "red"},
+            ],
+            'threshold':{
+                'line': {'color': "blue", 'width':4},
+                'thickness':1,
+                'value':1.5
+            }
+        }
+    ))
+    return fig
+
 def results(workload, inlet_temp, s, cooling_pred, outlook_pred_01, outlook_pred_05, outlook_pred_09):
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        with st.container(border=True):
-            st.subheader('EFFICIENCY')
-            cooling = (cooling_pred).round(2)
-            st.write('predicted cooling power per rack', cooling, 'KW')
-            PUE = (((3.0 * (workload / 100)) + cooling) / (3.0 * (workload / 100))).round(3)
-            st.write("expected PUE is ", PUE)
-    with col2:
+    #this function uses the user input and the predictions to get the final system results
+    tab1, tab2, tab3,=st.tabs(["EFFICIENCY RESULTS", "COST ESTIMATION PER RACK RESULTS"
+                                        ,"ML PIPELINE RESULTS"])
+    with tab1:#this tab is responsible for the PUE and stability
+        col1, col2 = st.columns(2)
+        with col1:
+            with st.container(border=True):
+                st.subheader('EFFICIENCY')
+                cooling = (cooling_pred).round(2)
+                st.write('predicted cooling power per rack', cooling, 'KW')
+                PUE = (((3.0 * (workload / 100)) + cooling) / (3.0 * (workload / 100))).round(3)
+                st.write("expected PUE is ", PUE)
+                st.plotly_chart(pue_bar_chart(PUE), use_container_width=True)
+        with col2:
+            with st.container(border=True):
+                st.subheader('STABILITY METRIC')
+                ur = (outlook_pred_09 - outlook_pred_01).round(2)
+                st.write(
+                    (outlook_pred_05).round(2), ' with an uncertainty range of', ur,
+                    'with a positive uncertainty or +', (outlook_pred_09 - outlook_pred_05).round(2),
+                    'and a negative of -', (outlook_pred_05 - outlook_pred_01).round(2)
+                )
+                if PUE < 1.5:
+                    if ur > 5:
+                        dt = (outlook_pred_05 - inlet_temp)
+                        st.write(
+                            "expected DT is around:", dt.round(2), 'with a positive uncertainty or +',
+                            ((outlook_pred_09 - outlook_pred_05) + dt).round(2), 'and a negative of -',
+                            ((outlook_pred_05 - outlook_pred_01) + dt).round(2)
+                        )
+                        if (outlook_pred_09 - outlook_pred_05) > (outlook_pred_05 - outlook_pred_01):
+                            if ((outlook_pred_09 - outlook_pred_05) + dt) >= 6:
+                                st.markdown(
+                                    "stability check: <span style='color:red'>UNSTABLE</span>",
+                                    unsafe_allow_html=True
+                                )
+                            elif ((outlook_pred_09 - outlook_pred_05) + dt) >= 5:
+                                st.markdown(
+                                    "stability check: <span style='color:orange'>STABLE BUT CAUTION</span>",
+                                    unsafe_allow_html=True
+                                )
+                            elif ((outlook_pred_09 - outlook_pred_05) + dt) >= 3:
+                                st.markdown(
+                                    "stability check: <span style='color:green'>FULLY STABLE</span>",
+                                    unsafe_allow_html=True
+                                )
+                            else:
+                                st.markdown(
+                                    "stability check: <span style='color:blue'>INEFFICIENT HEATING/OVERCOOLING</span>",
+                                    unsafe_allow_html=True
+                                )
+                        elif (outlook_pred_09 - outlook_pred_05) < (outlook_pred_05 - outlook_pred_01):
+                            if dt > 6:
+                                st.markdown(
+                                    "stability check: <span style='color:red'>UNSTABLE</span>",
+                                    unsafe_allow_html=True
+                                )
+                            elif dt >= 5:
+                                st.markdown(
+                                    "stability check: <span style='color:orange'>STABLE BUT CAUTION</span>",
+                                    unsafe_allow_html=True
+                                )
+                            elif dt >= 3:
+                                st.markdown(
+                                    "stability check: <span style='color:green'>FULLY STABLE</span>",
+                                    unsafe_allow_html=True
+                                )
+                            elif dt < 3:
+                                st.markdown(
+                                    "stability check: <span style='color:blue'>INEFFICIENT HEATING/OVERCOOLING</span>",
+                                    unsafe_allow_html=True
+                                )
+                    else:
+                        dt = (outlook_pred_05 - inlet_temp).round(2)
+                        st.write("expected DT is around:", dt)
+                        if dt > 6:
+                            st.markdown(
+                                "stability check: <span style='color:red'>UNSTABLE</span>",
+                                unsafe_allow_html=True
+                            )
+                        elif dt >= 5:
+                            st.markdown(
+                                "stability check: <span style='color:orange'>STABLE BUT CAUTION</span>",
+                                unsafe_allow_html=True
+                            )
+                        elif dt >= 3:
+                            st.markdown(
+                                "stability check: <span style='color:green'>FULLY STABLE</span>",
+                                unsafe_allow_html=True
+                            )
+                        elif dt < 3:
+                            st.markdown(
+                                "stability check: <span style='color:blue'>INEFFICIENT HEATING/OVERCOOLING</span>",
+                                unsafe_allow_html=True
+                            )
+                else:
+                    st.write("PUE is showing inefficient energy system")
+
+    with tab2:# this tab is in charge of the cost output
         with st.container(border=True):
             st.subheader('COST ESTIMATION PER RACK')
             if s == 1:
@@ -105,100 +223,37 @@ def results(workload, inlet_temp, s, cooling_pred, outlook_pred_01, outlook_pred
             elif s == 5:
                 rate = 0.0875
 
-            st.write("total cost is $", round((3.0 * (workload / 100) + cooling) * rate, 2), "per hour")
-            st.write("total IT power cost is $", round((3.0 * (workload / 100)) * rate, 2), "per hour")
-            st.write("added cooling cost is $", round((cooling) * rate, 2), "per hour")
+            tab4, tab5= st.tabs(["PER HOUR", "PER DAY"])
+            with tab4:
+                st.write("total cost is $", round((3.0 * (workload / 100) + cooling) * rate, 2), "per hour")
+                st.write("total IT power cost is $", round((3.0 * (workload / 100)) * rate, 2), "per hour")
+                st.write("added cooling cost is $", round((cooling) * rate, 2), "per hour")
+            with tab5:
+                st.write("total cost is $", round(((3.0 * (workload / 100) + cooling) * rate) * 24, 2), "per day")
+                st.write("total IT power cost is $", round(((3.0 * (workload / 100)) * rate) * 24, 2), "per day")
+                st.write("added cooling cost is $", round(((cooling) * rate) * 24, 2), "per day")
+    with tab3: #transparency of the data pipeline
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        st.subheader("ML Data Processing")
+        with st.container(border=True, horizontal_alignment='center'):
+            st.image(os.path.join(script_dir, "quantile_prediction_interval.png"),
+                     caption="Predicted Outlet Temperature scatter plot", width=800)
+        with st.container(border=True, horizontal_alignment='center'):
+            st.image(os.path.join(script_dir, "ridge_actual_vs_predicted.png"),
+                     caption="cooling power scatter plot", width=800)
+        with st.container(border=True, horizontal_alignment='center'):
+            st.image(os.path.join(script_dir, "Data_Center_Heat_Map.png"),
+                     caption="data center heat map", width=800)
+        with st.container(border=True, horizontal_alignment='center'):
+            st.image(os.path.join(script_dir, "Cooling_Unit_Power_Consumption(kW).png"),
+                     caption="Cooling Unit Power Consumption histo plot", width=800)
+        with st.container(border=True, horizontal_alignment='center'):
+            st.image(os.path.join(script_dir, "Cooling_Strategy_Action.png"),
+                     caption="Cooling strategy count plot", width=800)
 
-            st.write("total cost is $", round(((3.0 * (workload / 100) + cooling) * rate) * 24, 2), "per day")
-            st.write("total IT power cost is $", round(((3.0 * (workload / 100)) * rate) * 24, 2), "per day")
-            st.write("added cooling cost is $", round(((cooling) * rate) * 24, 2), "per day")
-    with col3:
-        with st.container(border=True):
-            st.subheader('STABILITY METRIC')
-            ur = (outlook_pred_09 - outlook_pred_01).round(2)
-            st.write(
-                (outlook_pred_05).round(2), ' with an uncertainty range of', ur,
-                'with a positive uncertainty or +', (outlook_pred_09 - outlook_pred_05).round(2),
-                'and a negative of -', (outlook_pred_05 - outlook_pred_01).round(2)
-            )
-            if PUE < 1.5:
-                if ur > 5:
-                    dt = (outlook_pred_05 - inlet_temp)
-                    st.write(
-                        "expected DT is around:", dt.round(2), 'with a positive uncertainty or +',
-                        ((outlook_pred_09 - outlook_pred_05) + dt).round(2), 'and a negative of -',
-                        ((outlook_pred_05 - outlook_pred_01) + dt).round(2)
-                    )
-                    if (outlook_pred_09 - outlook_pred_05) > (outlook_pred_05 - outlook_pred_01):
-                        if ((outlook_pred_09 - outlook_pred_05) + dt) >= 6:
-                            st.markdown(
-                                "stability check: <span style='color:red'>RED</span>",
-                                unsafe_allow_html=True
-                            )
-                        elif ((outlook_pred_09 - outlook_pred_05) + dt) >= 5:
-                            st.markdown(
-                                "stability check: <span style='color:orange'>YELLOW</span>",
-                                unsafe_allow_html=True
-                            )
-                        elif ((outlook_pred_09 - outlook_pred_05) + dt) >= 3:
-                            st.markdown(
-                                "stability check: <span style='color:green'>GREEN</span>",
-                                unsafe_allow_html=True
-                            )
-                        else:
-                            st.markdown(
-                                "stability check: <span style='color:blue'>BLUE (inefficient heating)</span>",
-                                unsafe_allow_html=True
-                            )
-                    elif (outlook_pred_09 - outlook_pred_05) < (outlook_pred_05 - outlook_pred_01):
-                        if dt > 6:
-                            st.markdown(
-                                "stability check: <span style='color:red'>RED</span>",
-                                unsafe_allow_html=True
-                            )
-                        elif dt >= 5:
-                            st.markdown(
-                                "stability check: <span style='color:orange'>YELLOW</span>",
-                                unsafe_allow_html=True
-                            )
-                        elif dt >= 3:
-                            st.markdown(
-                                "stability check: <span style='color:green'>GREEN</span>",
-                                unsafe_allow_html=True
-                            )
-                        elif dt < 3:
-                            st.markdown(
-                                "stability check: <span style='color:blue'>BLUE (inefficient heating)</span>",
-                                unsafe_allow_html=True
-                            )
-                else:
-                    dt = (outlook_pred_05 - inlet_temp).round(2)
-                    st.write("expected DT is around:", dt)
-                    if dt > 6:
-                        st.markdown(
-                            "stability check: <span style='color:red'>RED</span>",
-                            unsafe_allow_html=True
-                        )
-                    elif dt >= 5:
-                        st.markdown(
-                            "stability check: <span style='color:orange'>YELLOW</span>",
-                            unsafe_allow_html=True
-                        )
-                    elif dt >= 3:
-                        st.markdown(
-                            "stability check: <span style='color:green'>GREEN</span>",
-                            unsafe_allow_html=True
-                        )
-                    elif dt < 3:
-                        st.markdown(
-                            "stability check: <span style='color:blue'>BLUE (inefficient heating)</span>",
-                            unsafe_allow_html=True
-                        )
-            else:
-                st.write("PUE is showing inefficient energy system")
-if __name__ == '__main__':
+if __name__ == '__main__':#the final main function which calls all the others
     w, it, at, s_id, s_name = collect_inputs()
 
-    if st.button('run system'):
+    if st.button('run system'):#strimlit button to start the system after collection the user data
         cooling_pred, outlook_pred_01, outlook_pred_05, outlook_pred_09 = get_predictions( w, it, at, s_name)
         results(w, it, s_id, cooling_pred, outlook_pred_01, outlook_pred_05, outlook_pred_09)
